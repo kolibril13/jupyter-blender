@@ -11,7 +11,7 @@ type = "add-on"
 # * "network" — Jupyter notebook server binds to a local TCP port
 permissions = ["files", "network"]
 
-website = "https://github.com/Octoframes/jupyter-blender"
+website = "https://github.com/kolibril13/jupyter-blender"
 
 tags = ["Development", "System"]
 
