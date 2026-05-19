@@ -450,6 +450,38 @@ class Server:
                 joined + (os.pathsep + current if current else "")
             )
 
+        # ----- JupyterLab app-dir ------------------------------------
+        # JupyterLab's default app-dir is ``<sys.prefix>/share/jupyter/lab``,
+        # which in Blender resolves to a directory inside the Blender
+        # app bundle that doesn't contain the Lab UI assets. Because we
+        # installed JupyterLab with ``pip --target=<site-packages>``,
+        # the assets actually live in one of two places:
+        #
+        #   1. ``<site-packages>/jupyterlab/`` — the wheel bundles
+        #      ``static/``, ``schemas/`` and ``themes/`` inside the
+        #      package itself.
+        #   2. ``<site-packages>/share/jupyter/lab/`` — pip extracts the
+        #      wheel's ``*.data/data/share/jupyter/lab/`` payload here.
+        #
+        # We prefer (1) because it always exists wherever ``jupyterlab``
+        # was importable from; (2) is a fallback.
+        app_dir = self._discover_lab_app_dir(extra_path_entries)
+
+        # ----- JUPYTER_PATH ------------------------------------------
+        # Point jupyter_core at the per-target ``share/`` directories so
+        # kernelspecs, lab extensions, etc. are discovered.
+        jupyter_path_entries: list[str] = []
+        for entry in extra_path_entries:
+            share = Path(entry) / "share"
+            if share.is_dir():
+                jupyter_path_entries.append(str(share))
+        if jupyter_path_entries:
+            existing = env.get("JUPYTER_PATH", "")
+            joined = os.pathsep.join(jupyter_path_entries)
+            env["JUPYTER_PATH"] = (
+                joined + (os.pathsep + existing if existing else "")
+            )
+
         cmd = [
             sys.executable,
             "-m",
@@ -460,9 +492,39 @@ class Server:
             f"--IdentityProvider.token={token}",
             "--KernelProvisionerFactory.default_provisioner_name=pyxll-provisioner",
         ]
+        if app_dir is not None:
+            cmd.append(f"--app-dir={app_dir}")
         if not launch_browser:
             cmd.append("--no-browser")
         return cmd, env
+
+    @staticmethod
+    def _discover_lab_app_dir(site_packages_paths: list[str]) -> Optional[str]:
+        """Locate a JupyterLab app directory that contains ``static/``.
+
+        Tries (in order):
+          1. The ``jupyterlab`` package directory (wheels ship the UI
+             assets bundled inside the package).
+          2. ``<site-packages>/share/jupyter/lab`` for each candidate
+             site-packages, which is where pip --target places the
+             wheel's data files.
+        Returns ``None`` if nothing usable is found — the caller will
+        then omit ``--app-dir`` and let JupyterLab error out as before.
+        """
+        try:
+            import jupyterlab as _jl  # type: ignore[import-not-found]
+
+            pkg_dir = Path(_jl.__file__).resolve().parent
+            if (pkg_dir / "static").is_dir():
+                return str(pkg_dir)
+        except ImportError:
+            pass
+
+        for entry in site_packages_paths:
+            candidate = Path(entry) / "share" / "jupyter" / "lab"
+            if (candidate / "static").is_dir():
+                return str(candidate)
+        return None
 
     @staticmethod
     def _drain_subprocess_lines(
