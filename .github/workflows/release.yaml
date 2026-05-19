@@ -1,0 +1,35 @@
+on:
+  push:
+    tags:
+      - "v*"
+
+name: Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copy LICENSE into extension folder
+        run: cp -p LICENSE jupyter_blender/
+
+      - name: Create zip
+        run: zip -r -9 jupyter-blender-${GITHUB_REF_NAME}.zip jupyter_blender/
+
+      - name: Create a Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: jupyter-blender ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: |
+            jupyter-blender-${{ github.ref_name }}.zip
+          draft: false
+          generate_release_notes: true
+          prerelease: false

@@ -1,0 +1,25 @@
+schema_version = "1.0.0"
+
+id = "jupyter_blender"
+version = "0.1.0"
+name = "Jupyter"
+tagline = "Jupyter notebooks running inside Blender's Python interpreter"
+maintainer = "Jan-Hendrik Müller"
+type = "add-on"
+
+# * "files" — install site-packages dependencies via pip
+# * "network" — Jupyter notebook server binds to a local TCP port
+permissions = ["files", "network"]
+
+website = "https://github.com/Octoframes/jupyter-blender"
+
+tags = ["Development", "System"]
+
+blender_version_min = "5.1.0"
+
+license = [
+    "SPDX:AGPL-3.0-or-later",
+]
+copyright = [
+    "2025 jupyter-blender Contributors",
+]
