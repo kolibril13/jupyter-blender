@@ -338,6 +338,7 @@ class Server:
         notebook_dir: Path,
         connection_file_dir: Path,
         launch_browser: bool = True,
+        default_url: Optional[str] = None,
         line_callback: Optional[Callable[[str], None]] = None,
         finally_callback: Optional[Callable[["Server"], Any]] = None,
     ) -> None:
@@ -380,12 +381,25 @@ class Server:
             # ------------------------------------------------------- #
             # 2. JupyterLab subprocess                                #
             # ------------------------------------------------------- #
+            # JupyterLab's built-in browser launch always lands on
+            # ``LabApp.default_url`` (``/lab``); CLI overrides like
+            # ``--ServerApp.default_url`` get clobbered. So when the
+            # caller wants to land on a specific page (e.g. a notebook
+            # file), we pass ``--no-browser`` and open the targeted URL
+            # ourselves once the server prints its ready banner.
+            handle_browser_ourselves = (
+                launch_browser and default_url is not None
+            )
+            effective_launch_browser = (
+                launch_browser and not handle_browser_ourselves
+            )
+
             cmd, env = self._build_jupyterlab_cmd(
                 notebook_dir=notebook_dir,
                 token=self._token,
                 host=host,
                 port=port,
-                launch_browser=launch_browser,
+                launch_browser=effective_launch_browser,
             )
 
             self._jupyter_proc = subprocess.Popen(
@@ -396,11 +410,21 @@ class Server:
                 bufsize=0,
             )
 
+            effective_line_callback = line_callback
+            if handle_browser_ourselves:
+                target_url = (
+                    f"http://{host}:{port}{default_url}"
+                    f"?token={self._token}"
+                )
+                effective_line_callback = _make_ready_browser_opener(
+                    target_url, line_callback
+                )
+
             # Stream JupyterLab logs back to the caller in a daemon thread.
-            if line_callback is not None:
+            if effective_line_callback is not None:
                 self._lines_thread = threading.Thread(
                     target=self._drain_subprocess_lines,
-                    args=(self._jupyter_proc, line_callback),
+                    args=(self._jupyter_proc, effective_line_callback),
                     daemon=True,
                 )
                 self._lines_thread.start()
@@ -655,6 +679,39 @@ def _shutdown_kernel_via_client(connection_file: Path) -> None:
     t = threading.Thread(target=_do_shutdown, daemon=True)
     t.start()
     t.join(timeout=6.0)
+
+
+def _make_ready_browser_opener(
+    target_url: str,
+    inner_callback: Optional[Callable[[str], None]],
+) -> Callable[[str], None]:
+    """Return a line-callback that opens ``target_url`` once the
+    JupyterLab subprocess prints its "is running at" banner.
+
+    Forwards every line to ``inner_callback`` first (so logs still
+    stream to the UI) and uses an Event to ensure the browser is only
+    opened once.
+    """
+    import webbrowser
+
+    opened = threading.Event()
+
+    def _callback(text: str) -> None:
+        if inner_callback is not None:
+            try:
+                inner_callback(text)
+            except Exception:  # noqa: BLE001
+                pass
+        if opened.is_set():
+            return
+        if "is running at" in text.lower():
+            opened.set()
+            try:
+                webbrowser.open(target_url)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("Failed to open browser: %s", exc)
+
+    return _callback
 
 
 # Module-level singletons (mirrors marimo-blender's API).

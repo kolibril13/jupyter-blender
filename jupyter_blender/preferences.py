@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 import bpy
 
@@ -178,7 +179,7 @@ class StartJupyterServer(bpy.types.Operator):
                 port=prefs.port,
                 notebook_dir=notebook_dir,
                 connection_file_dir=_connection_file_dir(),
-                launch_browser=prefs.launch_browser,
+                launch_browser=True,
                 line_callback=lambda line: _lines_append(line)
                 or region.tag_redraw(),
                 finally_callback=lambda s: region.tag_redraw(),
@@ -186,6 +187,56 @@ class StartJupyterServer(bpy.types.Operator):
         except Exception as exc:  # noqa: BLE001
             self.report({"ERROR"}, f"Failed to start Jupyter: {exc}")
             return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class StartJupyterServerHeadless(bpy.types.Operator):
+    """Start the Jupyter server without opening a browser.
+
+    Copies the API URL (``http://host:port/?token=...``) to the
+    clipboard so it can be pasted into VS Code's "Jupyter: Specify
+    Jupyter Server for Connections" prompt.
+    """
+
+    bl_idname = "jupyter_blender.start_server_headless"
+    bl_label = "Start Headless"
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return (
+            not addon_setup.installer.is_running
+            and not addon_setup.server.is_running
+        )
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        prefs = context.preferences.addons[__package__].preferences
+
+        _LINES.clear()
+        region = context.region
+        notebook_dir = _resolve_notebook_dir(prefs.notebook_dir)
+
+        try:
+            addon_setup.server.start(
+                host=prefs.host,
+                port=prefs.port,
+                notebook_dir=notebook_dir,
+                connection_file_dir=_connection_file_dir(),
+                launch_browser=False,
+                line_callback=lambda line: _lines_append(line)
+                or region.tag_redraw(),
+                finally_callback=lambda s: region.tag_redraw(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.report({"ERROR"}, f"Failed to start Jupyter: {exc}")
+            return {"CANCELLED"}
+
+        url = addon_setup.server.jupyter_api_url()
+        if url:
+            context.window_manager.clipboard = url
+            self.report({"INFO"}, f"Jupyter server URL copied to clipboard: {url}")
+        else:
+            self.report({"WARNING"}, "Server started but URL is not available.")
         return {"FINISHED"}
 
 
@@ -209,8 +260,10 @@ class StartWithExample(bpy.types.Operator):
         prefs = context.preferences.addons[__package__].preferences
         example_path = Path(self.filepath).resolve()
         # JupyterLab's notebook-dir is a directory, so we point it at the
-        # examples folder and let the user open the .ipynb from there.
+        # examples folder and use ``--ServerApp.default_url`` to land the
+        # browser directly on the example .ipynb.
         prefs.notebook_dir = str(example_path.parent)
+        default_url = f"/lab/tree/{quote(example_path.name)}"
 
         _LINES.clear()
         region = context.region
@@ -220,7 +273,8 @@ class StartWithExample(bpy.types.Operator):
                 port=prefs.port,
                 notebook_dir=example_path.parent,
                 connection_file_dir=_connection_file_dir(),
-                launch_browser=prefs.launch_browser,
+                launch_browser=True,
+                default_url=default_url,
                 line_callback=lambda line: _lines_append(line)
                 or region.tag_redraw(),
                 finally_callback=lambda s: region.tag_redraw(),
@@ -305,9 +359,6 @@ def draw_preferences(
         dir_row = launch_body.row(align=True)
         dir_row.prop(prefs, "notebook_dir", text="", icon="FILE_FOLDER")
 
-        opts_row = launch_body.row(align=True)
-        opts_row.prop(prefs, "launch_browser", toggle=True, icon="URL")
-
         if is_running:
             launch_body.label(
                 text=(
@@ -336,13 +387,18 @@ def draw_preferences(
             )
             op.url_type = "API"
         else:
-            big = launch_body.row()
+            big = launch_body.row(align=True)
             big.scale_y = 1.4
             big.enabled = all_installed
             big.operator(
                 StartJupyterServer.bl_idname,
                 icon="URL",
                 text="Start Notebook Server",
+            )
+            big.operator(
+                StartJupyterServerHeadless.bl_idname,
+                icon="CONSOLE",
+                text="Start Headless",
             )
 
             example_path = os.path.join(_EXAMPLES_DIR, "move_cube.ipynb")
@@ -440,11 +496,6 @@ class JupyterAddonPreferences(bpy.types.AddonPreferences):
         description="Folder JupyterLab opens as its root. Leave empty for the home directory.",
         default="",
         subtype="DIR_PATH",
-    )
-    launch_browser: bpy.props.BoolProperty(
-        name="Open Browser on Start",
-        description="Whether to open the system browser automatically when starting",
-        default=True,
     )
     show_logs: bpy.props.BoolProperty(default=False)
     module_name: bpy.props.StringProperty(name="Module Name", default="")
