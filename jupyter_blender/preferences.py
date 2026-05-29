@@ -401,14 +401,14 @@ def draw_preferences(
                 text="Start Headless",
             )
 
-            example_path = os.path.join(_EXAMPLES_DIR, "move_cube.ipynb")
+            example_path = os.path.join(_EXAMPLES_DIR, "data_to_geometry.ipynb")
             if os.path.exists(example_path):
                 example_row = launch_body.row(align=True)
                 example_row.enabled = all_installed
                 op = example_row.operator(
                     StartWithExample.bl_idname,
                     icon="FILE_SCRIPT",
-                    text="Example: move_cube",
+                    text="Example: data_to_geometry",
                 )
                 op.filepath = example_path
 
