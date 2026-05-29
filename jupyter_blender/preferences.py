@@ -369,9 +369,10 @@ def draw_preferences(
             )
             actions = launch_body.row(align=True)
             actions.scale_y = 1.4
-            actions.operator(
-                StartJupyterServer.bl_idname, icon="URL", text="Open in Browser"
-            )
+            if not addon_setup.server.is_headless:
+                actions.operator(
+                    StartJupyterServer.bl_idname, icon="URL", text="Open in Browser"
+                )
             actions.operator(
                 StopJupyterServer.bl_idname, icon="X", text="Stop"
             )

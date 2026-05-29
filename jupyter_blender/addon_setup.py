@@ -304,6 +304,10 @@ class Server:
             return self._kernel is not None
 
     @property
+    def is_headless(self) -> bool:
+        return not self._launch_browser
+
+    @property
     def port(self) -> Optional[int]:
         return self._port
 
