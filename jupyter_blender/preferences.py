@@ -377,13 +377,8 @@ def draw_preferences(
             )
 
             url_row = launch_body.row(align=True)
-            url_row.label(text="Copy URL:")
             op = url_row.operator(
-                CopyJupyterURL.bl_idname, icon="COPYDOWN", text="Lab"
-            )
-            op.url_type = "LAB"
-            op = url_row.operator(
-                CopyJupyterURL.bl_idname, icon="COPYDOWN", text="API"
+                CopyJupyterURL.bl_idname, icon="COPYDOWN", text="Copy for VS Code"
             )
             op.url_type = "API"
         else:
