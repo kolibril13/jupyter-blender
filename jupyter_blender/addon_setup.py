@@ -19,6 +19,7 @@ the kernel does.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import pkgutil
@@ -291,6 +292,9 @@ class Server:
 
     def __init__(self) -> None:
         self._kernel: Any = None  # IPKernelApp
+        # The asyncio loop the kernel runs on (pumped by ``main_thread``),
+        # captured at start so ``stop`` can drain pending tasks on it.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._jupyter_proc: Optional[subprocess.Popen] = None
         self._connection_file: Optional[Path] = None
         self._token: Optional[str] = None
@@ -426,6 +430,13 @@ class Server:
             )
             self._kernel.initialize([sys.executable])
             self._kernel.kernel.start()
+            # Capture the loop the kernel scheduled its dispatch tasks on
+            # so ``stop`` can cancel/await them (the pump uses this same
+            # loop via ``asyncio.get_event_loop``).
+            try:
+                self._loop = asyncio.get_event_loop()
+            except RuntimeError:
+                self._loop = None
 
             # ------------------------------------------------------- #
             # 2. JupyterLab subprocess                                #
@@ -683,6 +694,16 @@ class Server:
             except Exception as exc:  # noqa: BLE001
                 logging.warning("JupyterLab subprocess shutdown failed: %s", exc)
 
+        # Stop pumping the kernel loop, then drain its pending dispatch
+        # tasks. Closing the kernel without cancelling these leaves
+        # coroutines (``Kernel.shell_main``, ``dispatch_control``) pending,
+        # so Python prints "Task was destroyed but it is pending" when they
+        # are garbage-collected. Cancelling and awaiting them first is
+        # clean — and must happen while we still own the (now un-pumped)
+        # loop, before the streams they await on are closed.
+        main_thread.unregister()
+        self._drain_loop()
+
         # IPKernelApp.
         if kernel is not None:
             try:
@@ -706,17 +727,41 @@ class Server:
             except Exception as exc:  # noqa: BLE001
                 logging.warning("IPKernelApp shutdown failed: %s", exc)
 
-        # Stop the event-loop pump and reset state.
-        main_thread.unregister()
-
         with self._LOCK:
             self._kernel = None
+            self._loop = None
             self._jupyter_proc = None
             self._connection_file = None
             self._token = None
             self._host = None
             self._port = None
             self._lines_thread = None
+
+    def _drain_loop(self) -> None:
+        """Cancel and await any tasks still pending on the kernel's loop.
+
+        Called during ``stop`` after the pump is unregistered (so the loop
+        is idle and we can drive it directly). Without this, the kernel's
+        long-lived dispatch coroutines are GC'd while pending and Python
+        warns about it on the console.
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            pending = asyncio.all_tasks(loop)
+        except RuntimeError:
+            return
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
+        try:
+            loop.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("Draining kernel tasks failed: %s", exc)
 
 
 # ----------------------------------------------------------------------- #
