@@ -555,13 +555,26 @@ class Server:
         app_dir = self._discover_lab_app_dir(extra_path_entries)
 
         # ----- JUPYTER_PATH ------------------------------------------
-        # Point jupyter_core at the per-target ``share/`` directories so
-        # kernelspecs, lab extensions, etc. are discovered.
+        # Point jupyter_core at the per-target Jupyter *data* directories
+        # (the ``share/jupyter`` level — see ``ENV_JUPYTER_PATH`` in
+        # jupyter_core.paths) so kernelspecs and, crucially, prebuilt
+        # labextensions (anywidget, ipywidgets, …) are discovered.
+        # ``jupyter_path('labextensions')`` appends ``labextensions`` to
+        # each entry, so entries must end at ``share/jupyter``.
+        #
+        # ``pip install --target`` does NOT extract a wheel's data-scheme
+        # payload into ``<target>/share``; it leaves it under
+        # ``<dist>-<ver>.data/data/share/jupyter/…``. Some pip versions do
+        # extract to ``<target>/share/jupyter``. Collect both layouts.
         jupyter_path_entries: list[str] = []
         for entry in extra_path_entries:
-            share = Path(entry) / "share"
-            if share.is_dir():
-                jupyter_path_entries.append(str(share))
+            site = Path(entry)
+            extracted = site / "share" / "jupyter"
+            if extracted.is_dir():
+                jupyter_path_entries.append(str(extracted))
+            for data_share in site.glob("*.data/data/share/jupyter"):
+                if data_share.is_dir():
+                    jupyter_path_entries.append(str(data_share))
         if jupyter_path_entries:
             existing = env.get("JUPYTER_PATH", "")
             joined = os.pathsep.join(jupyter_path_entries)
