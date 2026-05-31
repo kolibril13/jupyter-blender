@@ -25,7 +25,6 @@ import secrets
 import subprocess
 import sys
 import threading
-import time
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -582,25 +581,21 @@ class Server:
     def stop(self) -> None:
         """Tear down the JupyterLab subprocess and the in-process kernel.
 
-        Order matters: we ask the kernel to shut down through a Jupyter
-        client first (so the IO loop can drain message replies), then
-        kill JupyterLab, then close the kernel app and clear its
-        singleton state. Without ``clear_instance`` a follow-up start
-        gets the same dead kernel back.
+        The kernel lives in this process and its asyncio loop is pumped by
+        the Blender main thread (see ``main_thread``). ``stop`` is itself
+        called on the main thread, so a graceful client-driven shutdown
+        can't work — the kernel could never process the shutdown request
+        while the only thread that pumps its loop is blocked waiting for
+        the reply. We close the kernel directly instead. We kill
+        JupyterLab, then close the kernel app and clear its singleton
+        state. Without ``clear_instance`` a follow-up start gets the same
+        dead kernel back.
         """
         from . import main_thread
 
         with self._LOCK:
-            connection_file = self._connection_file
             kernel = self._kernel
             jupyter_proc = self._jupyter_proc
-
-        # Best-effort: ask the kernel to shut down cleanly.
-        if connection_file is not None and connection_file.exists():
-            try:
-                _shutdown_kernel_via_client(connection_file)
-            except Exception as exc:  # noqa: BLE001
-                logging.warning("Kernel client shutdown failed: %s", exc)
 
         # JupyterLab subprocess.
         if jupyter_proc is not None:
@@ -653,38 +648,6 @@ class Server:
 # ----------------------------------------------------------------------- #
 # Helpers                                                                 #
 # ----------------------------------------------------------------------- #
-def _shutdown_kernel_via_client(connection_file: Path) -> None:
-    """Connect a transient client and send a kernel shutdown request.
-
-    This runs in a background thread (the parent process can't block on
-    a kernel reply when the kernel lives in the same process). Errors
-    are surfaced via ``RuntimeError`` if the kernel stays alive for too
-    long.
-    """
-    from jupyter_client.blocking.client import BlockingKernelClient
-
-    def _do_shutdown() -> None:
-        kc = BlockingKernelClient(connection_file=str(connection_file))
-        kc.load_connection_file()
-        kc.start_channels()
-        try:
-            kc.shutdown(restart=False)
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline:
-                if not kc.is_alive():
-                    return
-                time.sleep(0.05)
-        finally:
-            try:
-                kc.stop_channels()
-            except Exception:  # noqa: BLE001
-                pass
-
-    t = threading.Thread(target=_do_shutdown, daemon=True)
-    t.start()
-    t.join(timeout=6.0)
-
-
 def _make_ready_browser_opener(
     target_url: str,
     inner_callback: Optional[Callable[[str], None]],
