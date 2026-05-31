@@ -7,8 +7,9 @@ Two singletons live here:
   Installer.
 
 - ``server`` — manages an in-process ``IPKernelApp`` plus a JupyterLab
-  subprocess that connects to it through pyxll-jupyter's "existing
-  kernel" provisioner. Architecture is ported from bpy_jupyter v2.1.
+  subprocess that connects to it through a small vendored "existing
+  kernel" provisioner (see ``_jupyterlab_launcher``). Architecture is
+  ported from bpy_jupyter v2.1.
 
 Running the kernel in-process is what makes ``import bpy`` work in
 notebook cells: the ``_bpy`` C extension only exists inside the Blender
@@ -28,6 +29,12 @@ import threading
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+# Kept in sync with ``_jupyterlab_launcher``: the name the vendored
+# provisioner is registered under, and the env var carrying the kernel's
+# connection file path to the JupyterLab subprocess.
+_PROVISIONER_NAME = "jupyter-blender-existing"
+_CONNECTION_FILE_ENV = "JUPYTER_BLENDER_CONNECTION_FILE"
 
 
 def _invoke_callback(callback: Optional[Callable], *args: Any) -> None:
@@ -156,7 +163,6 @@ class Installer(Executor):
         "jupyterlab",
         "ipykernel",
         "jupyter-client",
-        "pyxll-jupyter",
         "ipywidgets",
         "anywidget",
     ]
@@ -164,7 +170,6 @@ class Installer(Executor):
     # pip dist name → importable module name (where they differ).
     _DIST_TO_MODULE: dict[str, str] = {
         "jupyter-client": "jupyter_client",
-        "pyxll-jupyter": "pyxll_jupyter",
     }
 
     def _module_name(self, dist: str) -> str:
@@ -276,10 +281,10 @@ class Server:
     """In-process IPython kernel + JupyterLab subprocess.
 
     The kernel runs inside Blender so cells can ``import bpy``. JupyterLab
-    is launched as a subprocess and pointed at the kernel's connection
-    file via pyxll-jupyter's ``pyxll-provisioner`` — a Jupyter kernel
-    provisioner that attaches to an already-running kernel instead of
-    spawning a new one.
+    is launched as a subprocess (via ``_jupyterlab_launcher``) and pointed
+    at the kernel's connection file through a vendored kernel provisioner
+    that attaches to the already-running kernel instead of spawning a new
+    one.
     """
 
     _LOCK = threading.Lock()
@@ -492,11 +497,12 @@ class Server:
         launch_browser: bool,
     ) -> tuple[list[str], dict[str, str]]:
         # JupyterLab is a subprocess; it needs Blender's extension
-        # site-packages on its PYTHONPATH so it can find both
-        # ``jupyterlab`` and ``pyxll_jupyter`` (whose entry point
-        # registers the "pyxll-provisioner" kernel provisioner).
+        # site-packages on its PYTHONPATH so it can find ``jupyterlab``
+        # and ``jupyter_client``. The connection file is passed via env so
+        # the vendored provisioner (see ``_jupyterlab_launcher``) can
+        # attach JupyterLab to the in-process kernel.
         env = os.environ.copy()
-        env["PYXLL_IPYTHON_CONNECTION_FILE"] = str(self._connection_file)
+        env[_CONNECTION_FILE_ENV] = str(self._connection_file)
 
         extra_path_entries: list[str] = []
         for entry in sys.path:
@@ -504,7 +510,7 @@ class Server:
                 extra_path_entries.append(entry)
 
         # Also include the directory containing the bundled ``jupyter``
-        # package so ``python -m jupyterlab`` resolves it.
+        # package so the launcher's JupyterLab import resolves it.
         try:
             import jupyter
 
@@ -552,15 +558,15 @@ class Server:
                 joined + (os.pathsep + existing if existing else "")
             )
 
+        launcher = str(Path(__file__).resolve().parent / "_jupyterlab_launcher.py")
         cmd = [
             sys.executable,
-            "-m",
-            "jupyterlab",
+            launcher,
             f"--ip={host}",
             f"--port={port}",
             f"--notebook-dir={notebook_dir}",
             f"--IdentityProvider.token={token}",
-            "--KernelProvisionerFactory.default_provisioner_name=pyxll-provisioner",
+            f"--KernelProvisionerFactory.default_provisioner_name={_PROVISIONER_NAME}",
         ]
         if app_dir is not None:
             cmd.append(f"--app-dir={app_dir}")
