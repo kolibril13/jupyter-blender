@@ -351,11 +351,6 @@ def draw_preferences(
     )
     launch_header.label(text="Launch", icon="PLAY")
     if launch_body is not None:
-        net_row = launch_body.row(align=True)
-        split = net_row.split(factor=0.5)
-        split.prop(prefs, "host")
-        split.prop(prefs, "port")
-
         dir_row = launch_body.row(align=True)
         dir_row.prop(prefs, "notebook_dir", text="", icon="FILE_FOLDER")
 
@@ -377,11 +372,12 @@ def draw_preferences(
                 StopJupyterServer.bl_idname, icon="X", text="Stop"
             )
 
-            url_row = launch_body.row(align=True)
-            op = url_row.operator(
-                CopyJupyterURL.bl_idname, icon="COPYDOWN", text="Copy for VS Code"
-            )
-            op.url_type = "API"
+            if addon_setup.server.is_headless:
+                url_row = launch_body.row(align=True)
+                op = url_row.operator(
+                    CopyJupyterURL.bl_idname, icon="COPYDOWN", text="Copy Server URL"
+                )
+                op.url_type = "API"
         else:
             big = launch_body.row(align=True)
             big.scale_y = 1.4
@@ -397,6 +393,18 @@ def draw_preferences(
                 text="Start Headless",
             )
 
+            empty_path = os.path.join(_EXAMPLES_DIR, "empty.ipynb")
+            if os.path.exists(empty_path):
+                empty_row = launch_body.row(align=True)
+                empty_row.scale_y = 1.4
+                empty_row.enabled = all_installed
+                op = empty_row.operator(
+                    StartWithExample.bl_idname,
+                    icon="FILE",
+                    text="Open Empty Notebook",
+                )
+                op.filepath = empty_path
+
             example_path = os.path.join(_EXAMPLES_DIR, "data_to_geometry.ipynb")
             if os.path.exists(example_path):
                 example_row = launch_body.row(align=True)
@@ -404,7 +412,7 @@ def draw_preferences(
                 op = example_row.operator(
                     StartWithExample.bl_idname,
                     icon="FILE_SCRIPT",
-                    text="Example: data_to_geometry",
+                    text="Example: Data to Geometry",
                 )
                 op.filepath = example_path
 
