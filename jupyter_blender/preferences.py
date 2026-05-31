@@ -155,7 +155,7 @@ class StartJupyterServer(bpy.types.Operator):
     """Start the Jupyter notebook server and open it in a browser."""
 
     bl_idname = "jupyter_blender.start_server_or_open_browser"
-    bl_label = "Open Browser"
+    bl_label = "Start Browser"
     bl_options = {"REGISTER"}
 
     @classmethod
@@ -379,26 +379,28 @@ def draw_preferences(
                 )
                 op.url_type = "API"
         else:
-            for btn_op, btn_icon, btn_text in (
-                (StartJupyterServer.bl_idname, "URL", "Open Browser"),
-                (StartJupyterServerHeadless.bl_idname, "CONSOLE", "Start Headless"),
-            ):
-                row = launch_body.row(align=True)
-                row.scale_y = 1.4
-                row.enabled = all_installed
-                row.operator(btn_op, icon=btn_icon, text=btn_text)
-
             example_path = os.path.join(_EXAMPLES_DIR, "data_to_geometry.ipynb")
             if os.path.exists(example_path):
                 row = launch_body.row(align=True)
+
                 row.scale_y = 1.4
                 row.enabled = all_installed
                 op = row.operator(
                     StartWithExample.bl_idname,
                     icon="FILE_SCRIPT",
-                    text="Start with Examples",
+                    text="Start Browser+Example",
                 )
                 op.filepath = example_path
+
+            for btn_op, btn_icon, btn_text in (
+                (StartJupyterServer.bl_idname, "URL", "Start Browser"),
+                (StartJupyterServerHeadless.bl_idname, "CONSOLE", "Start Headless"),
+            ):
+                row = launch_body.row(align=True)
+
+                row.scale_y = 1.4
+                row.enabled = all_installed
+                row.operator(btn_op, icon=btn_icon, text=btn_text)
 
             if not all_installed:
                 launch_body.label(text="Install dependencies first ↓", icon="INFO")
