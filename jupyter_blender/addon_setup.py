@@ -164,6 +164,8 @@ class Installer(Executor):
         "jupyterlab",
         "ipykernel",
         "jupyter-client",
+        "ipywidgets",
+        "anywidget",
     ]
 
     # pip dist name → importable module name (where they differ).
