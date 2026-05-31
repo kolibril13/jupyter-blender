@@ -293,14 +293,45 @@ class Server:
         self._port: Optional[int] = None
         self._lines_thread: Optional[threading.Thread] = None
         self._launch_browser: bool = True
+        # Set True while ``stop`` is tearing things down, so the subprocess
+        # monitor can tell an intentional shutdown from a crash.
+        self._stopping: bool = False
+        # Exit code of the JupyterLab subprocess if it died on its own
+        # (e.g. the port was already in use). ``None`` while healthy.
+        self._server_exit_code: Optional[int] = None
 
     # ------------------------------------------------------------------ #
     # State                                                              #
     # ------------------------------------------------------------------ #
     @property
     def is_running(self) -> bool:
+        """True only when the kernel *and* the JupyterLab subprocess are up.
+
+        The kernel lives in-process and stays alive even if JupyterLab
+        dies, so checking the kernel alone would report a dead server as
+        running. The monitor thread is the sole owner of ``proc.poll()``
+        and records an unexpected exit in ``_server_exit_code``; reading
+        that flag here (instead of polling again) avoids a concurrent
+        ``poll()`` race while still flipping the UI back to Stopped when
+        JupyterLab crashes (e.g. port in use).
+        """
+        with self._LOCK:
+            return self._kernel is not None and self._server_exit_code is None
+
+    @property
+    def is_active(self) -> bool:
+        """True if there is anything to tear down (kernel created).
+
+        Unlike ``is_running`` this stays True even after the JupyterLab
+        subprocess has crashed, so shutdown paths still clean up the
+        leftover in-process kernel.
+        """
         with self._LOCK:
             return self._kernel is not None
+
+    @property
+    def server_exit_code(self) -> Optional[int]:
+        return self._server_exit_code
 
     @property
     def is_headless(self) -> bool:
@@ -356,10 +387,20 @@ class Server:
 
         from . import main_thread
 
+        # Self-heal: a previously crashed JupyterLab (e.g. port in use)
+        # leaves the in-process kernel running. ``is_running`` reports such
+        # a half-dead server as stopped, so the UI offers Start again —
+        # tear the leftover kernel down here before starting fresh rather
+        # than raising "already running".
+        if self.is_active and not self.is_running:
+            self.stop()
+
         with self._LOCK:
             if self._kernel is not None:
                 raise ValueError("Jupyter server is already running.")
 
+            self._stopping = False
+            self._server_exit_code = None
             connection_file_dir.mkdir(parents=True, exist_ok=True)
             self._connection_file = (
                 connection_file_dir / "jupyter-blender-kernel.json"
@@ -423,14 +464,16 @@ class Server:
                     target_url, line_callback
                 )
 
-            # Stream JupyterLab logs back to the caller in a daemon thread.
-            if effective_line_callback is not None:
-                self._lines_thread = threading.Thread(
-                    target=self._drain_subprocess_lines,
-                    args=(self._jupyter_proc, effective_line_callback),
-                    daemon=True,
-                )
-                self._lines_thread.start()
+            # Always monitor the subprocess in a daemon thread: it streams
+            # JupyterLab logs back to the caller *and* notices if the
+            # process dies on its own (draining stdout also keeps the pipe
+            # from filling and blocking JupyterLab).
+            self._lines_thread = threading.Thread(
+                target=self._monitor_subprocess,
+                args=(self._jupyter_proc, effective_line_callback),
+                daemon=True,
+            )
+            self._lines_thread.start()
 
         # 3. Start the event-loop pump *after* we drop the lock; the
         # callback only reads state that's already published.
@@ -553,22 +596,44 @@ class Server:
                 return str(candidate)
         return None
 
-    @staticmethod
-    def _drain_subprocess_lines(
+    def _monitor_subprocess(
+        self,
         proc: subprocess.Popen,
-        line_callback: Callable[[str], None],
+        line_callback: Optional[Callable[[str], None]],
     ) -> None:
+        """Drain the JupyterLab subprocess and watch for an early exit.
+
+        Runs in a daemon thread. Streams stdout line-by-line to
+        ``line_callback`` until the process exits, then — unless ``stop``
+        initiated the shutdown — records the exit code and emits a final
+        line so the UI surfaces the failure (the common cause is the port
+        already being in use).
+        """
         encoding = sys.getdefaultencoding()
         stream = proc.stdout
-        if stream is None:
+        if stream is not None:
+            while proc.poll() is None:
+                for buffer in iter(stream.readline, b""):
+                    try:
+                        text = buffer.decode(encoding).rstrip()
+                    except UnicodeDecodeError:
+                        text = buffer.decode(encoding, errors="replace").rstrip()
+                    _invoke_callback(line_callback, text)
+
+        exit_code = proc.poll()
+        if self._stopping:
             return
-        while proc.poll() is None:
-            for buffer in iter(stream.readline, b""):
-                try:
-                    text = buffer.decode(encoding).rstrip()
-                except UnicodeDecodeError:
-                    text = buffer.decode(encoding, errors="replace").rstrip()
-                _invoke_callback(line_callback, text)
+
+        # Unexpected exit — the kernel is still alive but JupyterLab is
+        # gone. Record it; ``is_running`` now reports False, and the line
+        # below redraws the panel back to its Start state.
+        self._server_exit_code = exit_code
+        logging.warning("JupyterLab exited unexpectedly (code %s)", exit_code)
+        _invoke_callback(
+            line_callback,
+            f"JupyterLab server exited unexpectedly (exit code {exit_code}). "
+            f"Port {self._port} may already be in use — try a different port.",
+        )
 
     def open_browser(self) -> None:
         url = self.jupyter_lab_url()
@@ -594,6 +659,9 @@ class Server:
         from . import main_thread
 
         with self._LOCK:
+            # Tell the monitor thread this exit is intentional so it
+            # doesn't report a crash.
+            self._stopping = True
             kernel = self._kernel
             jupyter_proc = self._jupyter_proc
 

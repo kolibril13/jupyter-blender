@@ -155,7 +155,7 @@ class StartJupyterServer(bpy.types.Operator):
     """Start the Jupyter notebook server and open it in a browser."""
 
     bl_idname = "jupyter_blender.start_server_or_open_browser"
-    bl_label = "Start Notebook Server"
+    bl_label = "Open Browser"
     bl_options = {"REGISTER"}
 
     @classmethod
@@ -379,40 +379,24 @@ def draw_preferences(
                 )
                 op.url_type = "API"
         else:
-            big = launch_body.row(align=True)
-            big.scale_y = 1.4
-            big.enabled = all_installed
-            big.operator(
-                StartJupyterServer.bl_idname,
-                icon="URL",
-                text="Start Notebook Server",
-            )
-            big.operator(
-                StartJupyterServerHeadless.bl_idname,
-                icon="CONSOLE",
-                text="Start Headless",
-            )
-
-            empty_path = os.path.join(_EXAMPLES_DIR, "empty.ipynb")
-            if os.path.exists(empty_path):
-                empty_row = launch_body.row(align=True)
-                empty_row.scale_y = 1.4
-                empty_row.enabled = all_installed
-                op = empty_row.operator(
-                    StartWithExample.bl_idname,
-                    icon="FILE",
-                    text="Open Empty Notebook",
-                )
-                op.filepath = empty_path
+            for btn_op, btn_icon, btn_text in (
+                (StartJupyterServer.bl_idname, "URL", "Open Browser"),
+                (StartJupyterServerHeadless.bl_idname, "CONSOLE", "Start Headless"),
+            ):
+                row = launch_body.row(align=True)
+                row.scale_y = 1.4
+                row.enabled = all_installed
+                row.operator(btn_op, icon=btn_icon, text=btn_text)
 
             example_path = os.path.join(_EXAMPLES_DIR, "data_to_geometry.ipynb")
             if os.path.exists(example_path):
-                example_row = launch_body.row(align=True)
-                example_row.enabled = all_installed
-                op = example_row.operator(
+                row = launch_body.row(align=True)
+                row.scale_y = 1.4
+                row.enabled = all_installed
+                op = row.operator(
                     StartWithExample.bl_idname,
                     icon="FILE_SCRIPT",
-                    text="Example: Data to Geometry",
+                    text="Start with Examples",
                 )
                 op.filepath = example_path
 

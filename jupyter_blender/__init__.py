@@ -87,10 +87,10 @@ def unregister() -> None:
     # ``bpy.app.timers`` pump can't fire — but we don't strictly need it
     # for shutdown: subprocess wait + IPKernelApp.close() are both
     # synchronous.
-    if addon_setup.server.is_running:
+    if addon_setup.server.is_active:
         addon_setup.server.stop()
         deadline = time.monotonic() + _SERVER_STOP_TIMEOUT
-        while addon_setup.server.is_running and time.monotonic() < deadline:
+        while addon_setup.server.is_active and time.monotonic() < deadline:
             time.sleep(_SERVER_DRAIN_INTERVAL)
 
     main_thread.unregister()
