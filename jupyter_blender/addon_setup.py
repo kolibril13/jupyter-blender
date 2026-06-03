@@ -156,12 +156,15 @@ class Executor:
 class Installer(Executor):
     """Install/uninstall Jupyter dependencies into Blender's site-packages.
 
-    Installs run through ``uv`` (``uv pip install --python <blender-python>
+    Installs prefer ``uv`` (``uv pip install --python <blender-python>
     --target <site-packages>``), which is 10–100× faster than pip at
     resolving and downloading the transitive closure (ipykernel,
-    jupyter_client, tornado, …). A system ``uv`` on ``PATH`` is preferred;
-    otherwise uv is bootstrapped once with pip into the same site-packages.
-    Wheels land in a location already on Blender's ``sys.path``.
+    jupyter_client, tornado, …). A system ``uv`` on ``PATH`` is used when
+    present, otherwise an importable ``uv`` whose binary actually exists.
+    When neither is available — e.g. an earlier ``pip install uv`` left the
+    ``uv`` *module* importable but its binary missing — installs fall back
+    to plain ``pip``, which is always present in Blender's Python. Either
+    way wheels land in a location already on Blender's ``sys.path``.
     """
 
     # Top-level pip distributions. Order matters only for display.
@@ -194,29 +197,53 @@ class Installer(Executor):
         return next((p for p in sys.path if p.endswith("site-packages")), None)
 
     @staticmethod
-    def _uv_command() -> Optional[list[str]]:
+    def _importable_uv_has_binary() -> bool:
+        """Whether an importable ``uv`` module can actually find its binary.
+
+        The ``uv`` *module* can be importable while the ``uv`` *binary* it
+        execs is absent — e.g. a prior ``pip install --target uv`` whose
+        scripts never landed where ``find_uv_bin`` looks. In that state
+        ``python -m uv`` raises ``UvNotFound``, so the module must not be
+        treated as a usable uv.
+        """
+        try:
+            import uv  # noqa: PLC0415
+
+            uv.find_uv_bin()
+            return True
+        except Exception:
+            return False
+
+    @classmethod
+    def _uv_command(cls) -> Optional[list[str]]:
         """How to invoke uv, preferring a uv already on the system.
 
         Returns ``["<path>"]`` for a uv on ``PATH``, ``[python, "-m",
-        "uv"]`` if the uv package is importable, or ``None`` when uv must
-        first be bootstrapped via pip.
+        "uv"]`` if the uv package is importable *and* its binary exists, or
+        ``None`` when no usable uv is available (callers fall back to pip).
         """
         system_uv = shutil.which("uv")
         if system_uv:
             return [system_uv]
-        if importlib.util.find_spec("uv") is not None:
+        if (
+            importlib.util.find_spec("uv") is not None
+            and cls._importable_uv_has_binary()
+        ):
             return [sys.executable, "-m", "uv"]
         return None
 
     @classmethod
     def _describe_uv(cls) -> str:
-        """Human-readable note for the log box about which uv will be used."""
+        """Human-readable note for the log box about which installer is used."""
         system_uv = shutil.which("uv")
         if system_uv:
             return f"Using system uv: {system_uv}"
-        if importlib.util.find_spec("uv") is not None:
-            return f"Using bootstrapped uv: {sys.executable} -m uv"
-        return "uv not found — bootstrapping it with pip, then using python -m uv"
+        if cls._uv_command() is not None:
+            return f"Using bundled uv: {sys.executable} -m uv"
+        return (
+            "No usable uv found — falling back to pip: "
+            f"{sys.executable} -m pip"
+        )
 
     @staticmethod
     def _subprocess_env(site_packages_path: Optional[str]) -> Optional[dict[str, str]]:
@@ -270,31 +297,30 @@ class Installer(Executor):
         packages: list[str],
         target_option: list[str],
     ) -> list[list[str]]:
-        """Command chain to install ``packages`` with uv, bootstrapping uv via
-        pip (and ensurepip, only if pip is missing) when no uv is available."""
-        commands: list[list[str]] = []
-        uv = self._uv_command()
-        if uv is None:
-            if importlib.util.find_spec("pip") is None:
-                commands.append([sys.executable, "-m", "ensurepip"])
-            commands.append([
-                sys.executable, "-m", "pip", "install",
-                *target_option,
-                # pip refuses to merge into an existing data-scheme dir under
-                # --target (e.g. site-packages/bin) unless --upgrade is given;
-                # without it the uv *binary* is never placed and the later
-                # ``python -m uv`` fails with UvNotFound.
-                "--upgrade",
-                "--disable-pip-version-check",
-                "--no-input",
-                "uv",
-            ])
-            uv = [sys.executable, "-m", "uv"]
+        """Command chain to install ``packages``.
 
+        Uses uv when one is genuinely usable (see :meth:`_uv_command`).
+        Otherwise falls back to plain ``pip install`` — always present in
+        Blender's Python — running ``ensurepip`` first only if pip is
+        somehow missing.
+        """
+        uv = self._uv_command()
+        if uv is not None:
+            return [[
+                *uv, "pip", "install",
+                "--python", sys.executable,
+                *target_option,
+                *packages,
+            ]]
+
+        commands: list[list[str]] = []
+        if importlib.util.find_spec("pip") is None:
+            commands.append([sys.executable, "-m", "ensurepip"])
         commands.append([
-            *uv, "pip", "install",
-            "--python", sys.executable,
+            sys.executable, "-m", "pip", "install",
             *target_option,
+            "--disable-pip-version-check",
+            "--no-input",
             *packages,
         ])
         return commands
