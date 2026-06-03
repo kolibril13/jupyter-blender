@@ -280,6 +280,11 @@ class Installer(Executor):
             commands.append([
                 sys.executable, "-m", "pip", "install",
                 *target_option,
+                # pip refuses to merge into an existing data-scheme dir under
+                # --target (e.g. site-packages/bin) unless --upgrade is given;
+                # without it the uv *binary* is never placed and the later
+                # ``python -m uv`` fails with UvNotFound.
+                "--upgrade",
                 "--disable-pip-version-check",
                 "--no-input",
                 "uv",
