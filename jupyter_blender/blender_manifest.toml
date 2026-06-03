@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "jupyter_blender"
-version = "0.1.6"
+version = "0.1.7"
 name = "Jupyter"
 tagline = "Jupyter notebooks running inside Blender's Python interpreter"
 maintainer = "Jan-Hendrik Müller"
