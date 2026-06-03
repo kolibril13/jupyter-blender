@@ -20,10 +20,12 @@ the kernel does.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import os
 import pkgutil
 import secrets
+import shutil
 import subprocess
 import sys
 import threading
@@ -100,6 +102,7 @@ class Executor:
     def exec_command(
         self,
         *args: str,
+        env: Optional[dict[str, str]] = None,
         line_callback: Optional[Callable[[str], None]] = None,
         finally_callback: Optional[Callable[["Executor"], Any]] = None,
     ) -> None:
@@ -109,7 +112,7 @@ class Executor:
         self._exit_code = -1
         self._command_line = " ".join(args)
         self._process = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env
         )
 
         def _enqueue_output() -> None:
@@ -153,10 +156,12 @@ class Executor:
 class Installer(Executor):
     """Install/uninstall Jupyter dependencies into Blender's site-packages.
 
-    pip is invoked with ``--target=<site-packages>`` so wheels end up in
-    a location already on Blender's ``sys.path``. The set of top-level
-    deps is intentionally small; pip resolves the transitive closure
-    (ipykernel, jupyter_client, tornado, …).
+    Installs run through ``uv`` (``uv pip install --python <blender-python>
+    --target <site-packages>``), which is 10–100× faster than pip at
+    resolving and downloading the transitive closure (ipykernel,
+    jupyter_client, tornado, …). A system ``uv`` on ``PATH`` is preferred;
+    otherwise uv is bootstrapped once with pip into the same site-packages.
+    Wheels land in a location already on Blender's ``sys.path``.
     """
 
     # Top-level pip distributions. Order matters only for display.
@@ -188,6 +193,107 @@ class Installer(Executor):
     def _site_packages_path() -> Optional[str]:
         return next((p for p in sys.path if p.endswith("site-packages")), None)
 
+    @staticmethod
+    def _uv_command() -> Optional[list[str]]:
+        """How to invoke uv, preferring a uv already on the system.
+
+        Returns ``["<path>"]`` for a uv on ``PATH``, ``[python, "-m",
+        "uv"]`` if the uv package is importable, or ``None`` when uv must
+        first be bootstrapped via pip.
+        """
+        system_uv = shutil.which("uv")
+        if system_uv:
+            return [system_uv]
+        if importlib.util.find_spec("uv") is not None:
+            return [sys.executable, "-m", "uv"]
+        return None
+
+    @classmethod
+    def _describe_uv(cls) -> str:
+        """Human-readable note for the log box about which uv will be used."""
+        system_uv = shutil.which("uv")
+        if system_uv:
+            return f"Using system uv: {system_uv}"
+        if importlib.util.find_spec("uv") is not None:
+            return f"Using bootstrapped uv: {sys.executable} -m uv"
+        return "uv not found — bootstrapping it with pip, then using python -m uv"
+
+    @staticmethod
+    def _subprocess_env(site_packages_path: Optional[str]) -> Optional[dict[str, str]]:
+        """Env that lets a fresh ``python -m uv`` import a uv installed into
+        the extension's ``--target`` site-packages (not on a subprocess's
+        default ``sys.path``)."""
+        if not site_packages_path:
+            return None
+        env = dict(os.environ)
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            site_packages_path + os.pathsep + existing
+            if existing
+            else site_packages_path
+        )
+        return env
+
+    def _run_command_chain(
+        self,
+        commands: list[list[str]],
+        env: Optional[dict[str, str]],
+        line_callback: Optional[Callable[[str], None]],
+        finally_callback: Optional[Callable[["Executor"], Any]],
+    ) -> None:
+        """Run subprocess commands sequentially, aborting if one fails.
+
+        ``line_callback`` is forwarded to every command; ``finally_callback``
+        fires exactly once, after the last command or the first failure.
+        """
+        if not commands:
+            _invoke_callback(finally_callback, self)
+            return
+
+        head, *tail = commands
+
+        def _after(executor: "Executor") -> None:
+            if executor.exit_code != 0:
+                _invoke_callback(finally_callback, executor)
+                return
+            self._run_command_chain(tail, env, line_callback, finally_callback)
+
+        self.exec_command(
+            *head,
+            env=env,
+            line_callback=line_callback,
+            finally_callback=_after,
+        )
+
+    def _install_commands(
+        self,
+        packages: list[str],
+        target_option: list[str],
+    ) -> list[list[str]]:
+        """Command chain to install ``packages`` with uv, bootstrapping uv via
+        pip (and ensurepip, only if pip is missing) when no uv is available."""
+        commands: list[list[str]] = []
+        uv = self._uv_command()
+        if uv is None:
+            if importlib.util.find_spec("pip") is None:
+                commands.append([sys.executable, "-m", "ensurepip"])
+            commands.append([
+                sys.executable, "-m", "pip", "install",
+                *target_option,
+                "--disable-pip-version-check",
+                "--no-input",
+                "uv",
+            ])
+            uv = [sys.executable, "-m", "uv"]
+
+        commands.append([
+            *uv, "pip", "install",
+            "--python", sys.executable,
+            *target_option,
+            *packages,
+        ])
+        return commands
+
     def install_python_modules(
         self,
         line_callback: Optional[Callable[[str], None]] = None,
@@ -204,23 +310,15 @@ class Installer(Executor):
             if not installed
         ]
         if not missing:
-            # Still run pip so the user gets feedback in the log box.
+            # Still run uv so the user gets feedback in the log box.
             missing = list(self.dependencies)
 
-        self.exec_command(
-            sys.executable, "-m", "ensurepip",
-            line_callback=line_callback,
-            finally_callback=lambda e: e.exec_command(
-                sys.executable, "-m", "pip", "install",
-                *target_option,
-                "--disable-pip-version-check",
-                "--no-input",
-                "--exists-action", "i",
-                "--upgrade",
-                *missing,
-                line_callback=line_callback,
-                finally_callback=finally_callback,
-            ),
+        _invoke_callback(line_callback, self._describe_uv())
+        self._run_command_chain(
+            self._install_commands(missing, target_option),
+            self._subprocess_env(site_packages_path),
+            line_callback,
+            finally_callback,
         )
 
     def install_python_module(
@@ -233,15 +331,12 @@ class Installer(Executor):
         target_option = (
             ["--target", site_packages_path] if site_packages_path else []
         )
-        self.exec_command(
-            sys.executable, "-m", "pip", "install",
-            *target_option,
-            "--disable-pip-version-check",
-            "--no-input",
-            "--exists-action", "i",
-            *module_name.split(),
-            line_callback=line_callback,
-            finally_callback=finally_callback,
+        _invoke_callback(line_callback, self._describe_uv())
+        self._run_command_chain(
+            self._install_commands(module_name.split(), target_option),
+            self._subprocess_env(site_packages_path),
+            line_callback,
+            finally_callback,
         )
 
     def uninstall_python_modules(
@@ -258,10 +353,17 @@ class Installer(Executor):
             _invoke_callback(line_callback, "No installed dependencies to remove.")
             _invoke_callback(finally_callback, self)
             return
+        # pip uninstall has no --target; it removes whatever it finds on
+        # sys.path, so PYTHONPATH must include the extension site-packages
+        # where the wheels were installed.
+        _invoke_callback(
+            line_callback, f"Uninstalling with pip: {sys.executable} -m pip"
+        )
         self.exec_command(
             sys.executable, "-m", "pip", "uninstall",
             "--yes",
             *installed,
+            env=self._subprocess_env(self._site_packages_path()),
             line_callback=line_callback,
             finally_callback=finally_callback,
         )
