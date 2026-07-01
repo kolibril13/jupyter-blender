@@ -214,15 +214,43 @@ class Installer(Executor):
         except Exception:
             return False
 
+    @staticmethod
+    def _find_system_uv() -> Optional[str]:
+        """Locate a ``uv`` binary, tolerating a GUI-launched Blender's PATH.
+
+        ``shutil.which`` only searches ``os.environ["PATH"]``. When Blender
+        is launched from Finder/Dock (rather than a terminal) macOS gives it
+        a minimal PATH that omits the dirs where uv is usually installed
+        (Homebrew's ``/opt/homebrew/bin``, ``~/.local/bin``, ``~/.cargo/bin``,
+        …) because those are only added by the shell's startup files. So we
+        fall back to probing the common install locations directly.
+        """
+        found = shutil.which("uv")
+        if found:
+            return found
+        exe = "uv.exe" if os.name == "nt" else "uv"
+        candidates = [
+            "/opt/homebrew/bin",  # Homebrew on Apple Silicon
+            "/usr/local/bin",  # Homebrew on Intel / manual installs
+            os.path.expanduser("~/.local/bin"),  # uv's own installer
+            os.path.expanduser("~/.cargo/bin"),  # cargo install uv
+        ]
+        for directory in candidates:
+            path = os.path.join(directory, exe)
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+        return None
+
     @classmethod
     def _uv_command(cls) -> Optional[list[str]]:
         """How to invoke uv, preferring a uv already on the system.
 
-        Returns ``["<path>"]`` for a uv on ``PATH``, ``[python, "-m",
-        "uv"]`` if the uv package is importable *and* its binary exists, or
-        ``None`` when no usable uv is available (callers fall back to pip).
+        Returns ``["<path>"]`` for a uv on ``PATH`` (or a common install
+        location), ``[python, "-m", "uv"]`` if the uv package is importable
+        *and* its binary exists, or ``None`` when no usable uv is available
+        (callers fall back to pip).
         """
-        system_uv = shutil.which("uv")
+        system_uv = cls._find_system_uv()
         if system_uv:
             return [system_uv]
         if (
@@ -235,7 +263,7 @@ class Installer(Executor):
     @classmethod
     def _describe_uv(cls) -> str:
         """Human-readable note for the log box about which installer is used."""
-        system_uv = shutil.which("uv")
+        system_uv = cls._find_system_uv()
         if system_uv:
             return f"Using system uv: {system_uv}"
         if cls._uv_command() is not None:
