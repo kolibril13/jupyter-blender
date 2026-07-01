@@ -2,6 +2,8 @@
 
 A Blender extension that runs a [Jupyter](https://jupyter.org) notebook server inside Blender so cells can `import bpy` and drive the running scene live.
 
+[![Watch the demo](https://img.youtube.com/vi/vhxb0HJeQs4/maxresdefault.jpg)](https://www.youtube.com/watch?v=vhxb0HJeQs4)
+
 Targets Blender 5.1+. Architecturally a mashup of:
 
 - [`bpy_jupyter`](https://github.com/Octoframes/bpy_jupyter) (v2.1 branch) — the in-process IPython kernel + JupyterLab subprocess pattern.
