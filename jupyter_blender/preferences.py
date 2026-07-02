@@ -35,6 +35,36 @@ def _lines_append(line: str) -> None:
     _LINES.append(line)
 
 
+def _tag_redraw_sidebars() -> None:
+    """Tag the View3D sidebar regions for redraw. Main thread only."""
+    for wm in bpy.data.window_managers:
+        for window in wm.windows:
+            for area in window.screen.areas:
+                if area.type == "VIEW_3D":
+                    for region in area.regions:
+                        if region.type == "UI":
+                            region.tag_redraw()
+    return None
+
+
+def _request_redraw(*_args) -> None:
+    """Thread-safe redraw request for the installer/server callbacks.
+
+    Worker threads must not call region.tag_redraw() directly: tagging
+    doesn't wake Blender's event loop, so with an idle UI the update (log
+    lines, the final "Done" state) only renders on the next input event —
+    completion appears to take seconds until the mouse moves. Registering
+    a timer is thread-safe, wakes the event loop immediately, and runs the
+    tagging on the main thread. is_registered coalesces bursts of log
+    lines into a single pending redraw.
+    """
+    try:
+        if not bpy.app.timers.is_registered(_tag_redraw_sidebars):
+            bpy.app.timers.register(_tag_redraw_sidebars, first_interval=0.0)
+    except ValueError:
+        pass  # lost a register race with another worker thread — fine
+
+
 def _connection_file_dir() -> Path:
     """Per-user, per-extension directory for the kernel connection file."""
     return Path(
@@ -74,10 +104,9 @@ class InstallPythonModules(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         _LINES.clear()
-        region = context.region
         addon_setup.installer.install_python_modules(
-            line_callback=lambda line: _lines_append(line) or region.tag_redraw(),
-            finally_callback=lambda e: region.tag_redraw(),
+            line_callback=lambda line: _lines_append(line) or _request_redraw(),
+            finally_callback=_request_redraw,
         )
         return {"FINISHED"}
 
@@ -97,11 +126,10 @@ class InstallPythonModule(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         _LINES.clear()
-        region = context.region
         addon_setup.installer.install_python_module(
             self.module_name,
-            line_callback=lambda line: _lines_append(line) or region.tag_redraw(),
-            finally_callback=lambda e: region.tag_redraw(),
+            line_callback=lambda line: _lines_append(line) or _request_redraw(),
+            finally_callback=_request_redraw,
         )
         return {"FINISHED"}
 
@@ -115,14 +143,18 @@ class UninstallPythonModules(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        return not addon_setup.installer.is_running
+        # Also blocked while the kernel/server is active: uninstalling
+        # would pull the files out from under the live kernel.
+        return (
+            not addon_setup.installer.is_running
+            and not addon_setup.server.is_active
+        )
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         _LINES.clear()
-        region = context.region
         addon_setup.installer.uninstall_python_modules(
-            line_callback=lambda line: _lines_append(line) or region.tag_redraw(),
-            finally_callback=lambda e: region.tag_redraw(),
+            line_callback=lambda line: _lines_append(line) or _request_redraw(),
+            finally_callback=_request_redraw,
         )
         return {"FINISHED"}
 
@@ -140,10 +172,9 @@ class ListPythonModules(bpy.types.Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         _LINES.clear()
-        region = context.region
         addon_setup.installer.list_python_modules(
-            line_callback=lambda line: _lines_append(line) or region.tag_redraw(),
-            finally_callback=lambda e: region.tag_redraw(),
+            line_callback=lambda line: _lines_append(line) or _request_redraw(),
+            finally_callback=_request_redraw,
         )
         return {"FINISHED"}
 
@@ -170,7 +201,6 @@ class StartJupyterServer(bpy.types.Operator):
             return {"FINISHED"}
 
         _LINES.clear()
-        region = context.region
         notebook_dir = _resolve_notebook_dir(prefs.notebook_dir)
 
         try:
@@ -181,8 +211,8 @@ class StartJupyterServer(bpy.types.Operator):
                 connection_file_dir=_connection_file_dir(),
                 launch_browser=True,
                 line_callback=lambda line: _lines_append(line)
-                or region.tag_redraw(),
-                finally_callback=lambda s: region.tag_redraw(),
+                or _request_redraw(),
+                finally_callback=_request_redraw,
             )
         except Exception as exc:  # noqa: BLE001
             self.report({"ERROR"}, f"Failed to start Jupyter: {exc}")
@@ -213,7 +243,6 @@ class StartJupyterServerHeadless(bpy.types.Operator):
         prefs = context.preferences.addons[__package__].preferences
 
         _LINES.clear()
-        region = context.region
         notebook_dir = _resolve_notebook_dir(prefs.notebook_dir)
 
         try:
@@ -224,8 +253,8 @@ class StartJupyterServerHeadless(bpy.types.Operator):
                 connection_file_dir=_connection_file_dir(),
                 launch_browser=False,
                 line_callback=lambda line: _lines_append(line)
-                or region.tag_redraw(),
-                finally_callback=lambda s: region.tag_redraw(),
+                or _request_redraw(),
+                finally_callback=_request_redraw,
             )
         except Exception as exc:  # noqa: BLE001
             self.report({"ERROR"}, f"Failed to start Jupyter: {exc}")
@@ -266,7 +295,6 @@ class StartWithExample(bpy.types.Operator):
         default_url = f"/lab/tree/{quote(example_path.name)}"
 
         _LINES.clear()
-        region = context.region
         try:
             addon_setup.server.start(
                 host=prefs.host,
@@ -276,8 +304,8 @@ class StartWithExample(bpy.types.Operator):
                 launch_browser=True,
                 default_url=default_url,
                 line_callback=lambda line: _lines_append(line)
-                or region.tag_redraw(),
-                finally_callback=lambda s: region.tag_redraw(),
+                or _request_redraw(),
+                finally_callback=_request_redraw,
             )
         except Exception as exc:  # noqa: BLE001
             self.report({"ERROR"}, f"Failed to start Jupyter: {exc}")
@@ -416,6 +444,7 @@ def draw_preferences(
     if deps_body is not None:
         install_row = deps_body.row()
         install_row.alert = not all_installed
+        install_row.enabled = not all_installed
         install_row.operator(InstallPythonModules.bl_idname, icon="PREFERENCES")
 
         deps_body.label(text="Required Python Modules:")

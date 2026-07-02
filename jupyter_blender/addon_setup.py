@@ -20,10 +20,12 @@ the kernel does.
 from __future__ import annotations
 
 import asyncio
+import importlib.machinery
+import importlib.metadata
 import importlib.util
 import logging
 import os
-import pkgutil
+import re
 import secrets
 import shutil
 import subprocess
@@ -181,16 +183,49 @@ class Installer(Executor):
         "jupyter-client": "jupyter_client",
     }
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._modules_cache: Optional[dict[str, bool]] = None
+
     def _module_name(self, dist: str) -> str:
         return self._DIST_TO_MODULE.get(dist, dist)
 
     def get_required_modules(self) -> dict[str, bool]:
-        modules = {d: False for d in self.dependencies}
-        installed_top_levels = {m.name for m in pkgutil.iter_modules()}
-        for dist in modules:
-            if self._module_name(dist) in installed_top_levels:
-                modules[dist] = True
-        return modules
+        """Map each required dist name to whether its module is importable.
+
+        Cached: the sidebar panel calls this on every redraw, and probing
+        the filesystem per redraw makes the whole UI sticky once
+        site-packages is populated. Install/uninstall completion
+        invalidates the cache (see :meth:`_invalidating`). PathFinder, not
+        importlib.util.find_spec: the latter answers from sys.modules, so
+        an already-imported package would still read as "installed" right
+        after its files were uninstalled.
+        """
+        if self._modules_cache is None:
+            importlib.invalidate_caches()
+            self._modules_cache = {
+                dist: importlib.machinery.PathFinder.find_spec(
+                    self._module_name(dist)
+                )
+                is not None
+                for dist in self.dependencies
+            }
+        return self._modules_cache
+
+    def invalidate_modules_cache(self) -> None:
+        self._modules_cache = None
+
+    def _invalidating(
+        self,
+        finally_callback: Optional[Callable[["Executor"], Any]],
+    ) -> Callable[["Executor"], None]:
+        """Wrap a finally_callback so completion refreshes the module cache."""
+
+        def _finally(executor: "Executor") -> None:
+            self.invalidate_modules_cache()
+            _invoke_callback(finally_callback, executor)
+
+        return _finally
 
     @staticmethod
     def _site_packages_path() -> Optional[str]:
@@ -377,7 +412,7 @@ class Installer(Executor):
             self._install_commands(missing, target_option),
             self._subprocess_env(site_packages_path),
             line_callback,
-            finally_callback,
+            self._invalidating(finally_callback),
         )
 
     def install_python_module(
@@ -395,36 +430,87 @@ class Installer(Executor):
             self._install_commands(module_name.split(), target_option),
             self._subprocess_env(site_packages_path),
             line_callback,
-            finally_callback,
+            self._invalidating(finally_callback),
         )
+
+    @staticmethod
+    def _canonical(name: str) -> str:
+        return re.sub(r"[-_.]+", "-", name).lower()
+
+    def _target_removal_set(
+        self, site_packages_path: Optional[str]
+    ) -> list[str]:
+        """Our dependencies plus their transitive requirements, restricted to
+        distributions actually installed in the target site-packages.
+
+        Install pulls in the whole dependency closure (tornado, pyzmq,
+        jupyter_server, …), so a proper uninstall must remove that closure —
+        not just the top-level dists, which would leave dozens of orphaned
+        packages behind.
+        """
+        if not site_packages_path:
+            return []
+        in_target: dict[str, tuple[str, importlib.metadata.Distribution]] = {}
+        for dist in importlib.metadata.distributions(path=[site_packages_path]):
+            name = dist.metadata["Name"]
+            if name:
+                in_target[self._canonical(name)] = (name, dist)
+
+        stack = [
+            self._canonical(re.split(r"[<>=!~\s\[]", d, maxsplit=1)[0])
+            for d in self.dependencies
+        ]
+        seen: set[str] = set()
+        removal: list[str] = []
+        while stack:
+            key = stack.pop()
+            if key in seen or key not in in_target:
+                continue
+            seen.add(key)
+            name, dist = in_target[key]
+            removal.append(name)
+            for req in dist.requires or []:
+                stack.append(
+                    self._canonical(
+                        re.split(r"[<>=!~;\s\[(]", req, maxsplit=1)[0]
+                    )
+                )
+        return removal
 
     def uninstall_python_modules(
         self,
         line_callback: Optional[Callable[[str], None]] = None,
         finally_callback: Optional[Callable[["Executor"], Any]] = None,
     ) -> None:
-        installed = [
-            name
-            for name, is_installed in self.get_required_modules().items()
-            if is_installed
-        ]
-        if not installed:
+        site_packages_path = self._site_packages_path()
+        packages = self._target_removal_set(site_packages_path)
+        if not packages:
             _invoke_callback(line_callback, "No installed dependencies to remove.")
+            self.invalidate_modules_cache()
             _invoke_callback(finally_callback, self)
             return
-        # pip uninstall has no --target; it removes whatever it finds on
-        # sys.path, so PYTHONPATH must include the extension site-packages
-        # where the wheels were installed.
-        _invoke_callback(
-            line_callback, f"Uninstalling with pip: {sys.executable} -m pip"
-        )
-        self.exec_command(
-            sys.executable, "-m", "pip", "uninstall",
-            "--yes",
-            *installed,
-            env=self._subprocess_env(self._site_packages_path()),
-            line_callback=line_callback,
-            finally_callback=finally_callback,
+
+        _invoke_callback(line_callback, self._describe_uv())
+        uv = self._uv_command()
+        if uv is not None:
+            commands = [[
+                *uv, "pip", "uninstall",
+                "--python", sys.executable,
+                "--target", site_packages_path,
+                *packages,
+            ]]
+        else:
+            # pip has no --target for uninstall; _subprocess_env puts the
+            # target site-packages on the subprocess's PYTHONPATH so pip can
+            # find (and remove) the distributions installed there.
+            commands = [[
+                sys.executable, "-m", "pip", "uninstall", "--yes", *packages,
+            ]]
+        self._run_command_chain(
+            commands,
+            self._subprocess_env(site_packages_path),
+            line_callback,
+            self._invalidating(finally_callback),
         )
 
     def list_python_modules(
