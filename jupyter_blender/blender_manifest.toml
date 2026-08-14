@@ -7,10 +7,6 @@ tagline = "Jupyter notebooks running inside Blender's Python interpreter"
 maintainer = "Jan-Hendrik Müller"
 type = "add-on"
 
-# * "files" — install site-packages dependencies via pip
-# * "network" — Jupyter notebook server binds to a local TCP port
-permissions = ["files", "network"]
-
 website = "https://github.com/kolibril13/jupyter-blender"
 
 tags = ["Development", "System"]
@@ -23,3 +19,11 @@ license = [
 copyright = [
     "2025 jupyter-blender Contributors",
 ]
+
+# Must be a table of short reasons (<= 64 chars); the older list form is
+# rejected by Blender 5.x's manifest parser.
+# * files   — install site-packages dependencies via pip/uv
+# * network — Jupyter notebook server binds to a local TCP port
+[permissions]
+files = "Install Jupyter Python dependencies into site-packages"
+network = "Run a local JupyterLab server on a local TCP port"
